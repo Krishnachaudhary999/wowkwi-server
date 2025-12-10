@@ -11,7 +11,7 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 const PORT = process.env.PORT || 3000;
-const DISCORD_WEBHOOK_URL = "YOUR_DISCORD_WEBHOOK_URL"; // replace with your webhook
+const DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1448339374818197655/nH9zMFu-A92FWNRVybOS3PfQnqQTNpQRvWsKcJYVo2vaP1KR7rwBygfHfbkjcJoI3KV4"; // replace with your webhook
 
 app.use(cors());
 app.use(bodyParser.json());
