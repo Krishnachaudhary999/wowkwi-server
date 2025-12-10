@@ -1,134 +1,78 @@
-// server.js
 const express = require('express');
-const http = require('http');
-const path = require('path');
-const bodyParser = require('body-parser');
+const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
-const Database = require('better-sqlite3');
-const { Server } = require('socket.io');
 const axios = require('axios');
+const http = require('http');
+const { Server } = require('socket.io');
+const bodyParser = require('body-parser');
 
-const PORT = process.env.PORT || 3000;
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || ''; // set this in env
-const TEMP_THRESHOLD = parseFloat(process.env.TEMP_THRESHOLD || '30'); // degC
-
-// --- Setup Express ---
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// middlewares
+const PORT = process.env.PORT || 3000;
+const DISCORD_WEBHOOK_URL = "YOUR_DISCORD_WEBHOOK_URL"; // replace with your webhook
+
 app.use(cors());
 app.use(bodyParser.json());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static('public')); // for dashboard.html
 
-// --- Setup SQLite ---
-const db = new Database(path.join(__dirname, 'data.sqlite'));
+// ---------------- DATABASE ----------------
+const db = new sqlite3.Database('./weather.db', (err) => {
+    if (err) console.error(err.message);
+    else console.log('Connected to SQLite database.');
+});
 
-// Create table if not exists
-db.prepare(`
-  CREATE TABLE IF NOT EXISTS readings (
+db.run(`CREATE TABLE IF NOT EXISTS weather (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    temperature REAL NOT NULL,
-    humidity REAL NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`).run();
+    temperature REAL,
+    humidity REAL,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+)`);
 
-// prepared statements
-const insertStmt = db.prepare('INSERT INTO readings (temperature, humidity) VALUES (?, ?)');
-const selectRecentStmt = db.prepare('SELECT id, temperature, humidity, created_at FROM readings ORDER BY created_at DESC LIMIT ?');
-const selectRangeStmt = db.prepare('SELECT id, temperature, humidity, created_at FROM readings WHERE created_at >= ? ORDER BY created_at ASC');
-const selectLatestStmt = db.prepare('SELECT id, temperature, humidity, created_at FROM readings ORDER BY created_at DESC LIMIT 1');
+// ---------------- API ROUTES ----------------
 
-// --- Helper: notify Discord ---
-async function sendDiscordNotification(temperature, humidity) {
-  if (!DISCORD_WEBHOOK_URL) {
-    console.log('Discord webhook URL not configured; skipping notification.');
-    return;
-  }
-
-  try {
-    const content = `⚠️ Temperature alert: ${temperature.toFixed(2)} °C (Humidity: ${humidity.toFixed(2)}%). Threshold: ${TEMP_THRESHOLD}°C`;
-    await axios.post(DISCORD_WEBHOOK_URL, {
-      content
-    });
-    console.log('Discord notification sent.');
-  } catch (err) {
-    console.error('Failed to send Discord notification:', err.message);
-  }
-}
-
-// --- Webhook endpoint for device POSTs ---
-// Accepts JSON { "temperature": <float>, "humidity": <float> }
-app.post('/webhook', async (req, res) => {
-  try {
+// Receive data from Pico W
+app.post('/api/update', (req, res) => {
     const { temperature, humidity } = req.body;
     if (typeof temperature !== 'number' || typeof humidity !== 'number') {
-      return res.status(400).json({ error: 'Invalid payload. Expected JSON with numeric temperature and humidity.' });
+        return res.status(400).json({ error: "Invalid data" });
     }
 
-    // Insert into DB
-    const info = insertStmt.run(temperature, humidity);
+    db.run(`INSERT INTO weather (temperature, humidity) VALUES (?, ?)`,
+        [temperature, humidity],
+        function(err) {
+            if (err) return res.status(500).json({ error: err.message });
 
-    // Get inserted row
-    const latest = selectLatestStmt.get();
+            // Emit via WebSocket
+            io.emit('new_data', { temperature, humidity, timestamp: new Date() });
 
-    // Emit via socket.io to connected clients
-    io.emit('reading', latest);
+            // Discord webhook alert if temperature > 30
+            if (temperature > 30) {
+                axios.post(DISCORD_WEBHOOK_URL, {
+                    content: `:fire: Temperature alert! Current temperature: ${temperature}°C`
+                }).catch(console.error);
+            }
 
-    // If temperature exceeds threshold, send discord webhook (non-blocking)
-    if (temperature > TEMP_THRESHOLD) {
-      sendDiscordNotification(temperature, humidity);
-    }
-
-    return res.json({ ok: true, id: info.lastInsertRowid });
-  } catch (err) {
-    console.error('Error handling webhook:', err);
-    return res.status(500).json({ error: 'Server error' });
-  }
+            res.json({ status: 'success' });
+        });
 });
 
-// --- API: get recent n readings ---
-app.get('/api/recent/:n?', (req, res) => {
-  const n = Math.min(1000, Math.max(1, parseInt(req.params.n || '100')));
-  const rows = selectRecentStmt.all(n);
-  res.json(rows);
+// Get recent records
+app.get('/api/recent', (req, res) => {
+    const n = parseInt(req.query.n) || 10; // default 10 records
+    db.all(`SELECT * FROM weather ORDER BY id DESC LIMIT ?`, [n], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
+    });
 });
 
-// --- API: get readings from timestamp (YYYY-MM-DD HH:MM:SS) ---
-app.get('/api/range', (req, res) => {
-  const since = req.query.since; // optional
-  if (!since) {
-    return res.status(400).json({ error: 'Missing "since" query param (e.g. 2025-12-09 00:00:00)' });
-  }
-  const rows = selectRangeStmt.all(since);
-  res.json(rows);
-});
-
-// Serve dashboard at '/'
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-// Socket.io connections
-io.on('connection', (socket) => {
-  console.log('Client connected:', socket.id);
-
-  // Send last 100 readings on connect
-  const rows = selectRecentStmt.all(200);
-  socket.emit('init', rows.reverse()); // oldest first
-
-  socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
-  });
-});
-
-// Start server
+// ---------------- START SERVER ----------------
 server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-  console.log(`Temp threshold: ${TEMP_THRESHOLD}°C`);
-  if (!DISCORD_WEBHOOK_URL) {
-    console.log('No DISCORD_WEBHOOK_URL set — Discord notifications disabled.');
-  }
+    console.log(`Server running on port ${PORT}`);
+});
+
+// ---------------- WEBSOCKET ----------------
+io.on('connection', (socket) => {
+    console.log('Client connected via WebSocket');
 });

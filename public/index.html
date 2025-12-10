@@ -1,50 +1,60 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8" />
-  <title>Weather Dashboard</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
-    body { font-family: Arial, sans-serif; margin: 12px; background:#f7f7f7 }
-    .container { max-width: 1000px; margin: 0 auto; }
-    header { display:flex; align-items:center; justify-content:space-between; }
-    h1 { margin:0; font-size:1.4rem; }
-    #last { text-align:right; font-size:0.9rem; color:#333; }
-    #chartContainer { background:white; padding:12px; border-radius:8px; box-shadow:0 1px 4px rgba(0,0,0,0.08); margin-top:12px; }
-    #table { width:100%; border-collapse:collapse; margin-top:12px; background:white; border-radius:8px; overflow:hidden; box-shadow:0 1px 4px rgba(0,0,0,0.08); }
-    #table th, #table td { padding:8px 10px; border-bottom:1px solid #eee; text-align:left; }
-    #table th { background:#fafafa; font-weight:600; font-size:0.9rem; }
-    .badge { display:inline-block; padding:4px 8px; border-radius:999px; background:#eee; font-size:0.85rem; }
-  </style>
+    <title>Weather Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.socket.io/4.7.1/socket.io.min.js"></script>
 </head>
 <body>
-  <div class="container">
-    <header>
-      <h1>Weather Station Dashboard</h1>
-      <div id="last">
-        <div id="lastReading">No data yet</div>
-        <div class="badge" id="status">Disconnected</div>
-      </div>
-    </header>
+    <h1>Weather Dashboard</h1>
+    <canvas id="tempChart" width="600" height="300"></canvas>
+    <canvas id="humChart" width="600" height="300"></canvas>
 
-    <div id="chartContainer">
-      <canvas id="chart" width="900" height="300"></canvas>
-    </div>
+    <script>
+        const tempCtx = document.getElementById('tempChart').getContext('2d');
+        const humCtx = document.getElementById('humChart').getContext('2d');
 
-    <table id="table">
-      <thead>
-        <tr>
-          <th>Time</th>
-          <th>Temperature (°C)</th>
-          <th>Humidity (%)</th>
-        </tr>
-      </thead>
-      <tbody id="tableBody"></tbody>
-    </table>
-  </div>
+        let labels = [];
+        let tempData = [];
+        let humData = [];
 
-  <script src="/socket.io/socket.io.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-  <script src="/main.js"></script>
+        const tempChart = new Chart(tempCtx, {
+            type: 'line',
+            data: { labels, datasets: [{ label: 'Temperature °C', data: tempData, borderColor: 'red', fill: false }] },
+            options: { responsive: true }
+        });
+
+        const humChart = new Chart(humCtx, {
+            type: 'line',
+            data: { labels, datasets: [{ label: 'Humidity %', data: humData, borderColor: 'blue', fill: false }] },
+            options: { responsive: true }
+        });
+
+        async function fetchRecent() {
+            const res = await fetch('/api/recent?n=10');
+            const data = await res.json();
+            labels = data.map(d => new Date(d.timestamp).toLocaleTimeString()).reverse();
+            tempData = data.map(d => d.temperature).reverse();
+            humData = data.map(d => d.humidity).reverse();
+            tempChart.data.labels = labels;
+            tempChart.data.datasets[0].data = tempData;
+            humChart.data.labels = labels;
+            humChart.data.datasets[0].data = humData;
+            tempChart.update();
+            humChart.update();
+        }
+
+        fetchRecent();
+
+        const socket = io();
+        socket.on('new_data', (d) => {
+            labels.push(new Date(d.timestamp).toLocaleTimeString());
+            tempData.push(d.temperature);
+            humData.push(d.humidity);
+            if (labels.length > 10) { labels.shift(); tempData.shift(); humData.shift(); }
+            tempChart.update();
+            humChart.update();
+        });
+    </script>
 </body>
 </html>
